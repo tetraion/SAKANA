@@ -52,11 +52,13 @@ def format_timestamp_srt(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 
-def generate_srt(segments: Iterable[dict], output_path: str) -> None:
+def generate_srt(segments: Iterable[dict], output_path: str, offset_seconds: float) -> None:
     lines: List[str] = []
     for idx, seg in enumerate(segments, start=1):
-        start = format_timestamp_srt(float(seg["start"]))
-        end = format_timestamp_srt(float(seg["end"]))
+        start_sec = max(0.0, float(seg["start"]) + offset_seconds)
+        end_sec = max(0.0, float(seg["end"]) + offset_seconds)
+        start = format_timestamp_srt(start_sec)
+        end = format_timestamp_srt(end_sec)
         text = str(seg["text"]).strip()
         lines.append(str(idx))
         lines.append(f"{start} --> {end}")
@@ -95,6 +97,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=DEFAULT_MODEL, help="mlx-whisper モデル（デフォルト: large v3）")
     parser.add_argument("--language", default=DEFAULT_LANGUAGE, help="言語コード（デフォルト: ja）")
     parser.add_argument("--no-verbose", action="store_true", help="mlx-whisper の詳細ログを抑制")
+    parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        help="字幕タイムコードに加える秒オフセット（デフォルト: 0）",
+    )
+    # カットEDL生成は srt_to_edl.py 側で完結させる
     args = parser.parse_args(argv)
 
     if not os.path.exists(args.input):
@@ -132,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
         print("Writing SRT...")
-        generate_srt(segments, args.output)
+        generate_srt(segments, args.output, offset_seconds=args.offset)
 
         print("✓ Done")
         print(f"  SRT: {args.output}")

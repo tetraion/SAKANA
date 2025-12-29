@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import glob
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -56,7 +57,8 @@ def download_clip(
     end_time: Optional[str],
     output_path: str,
     *,
-    video_format: str = "bv*[height<=1080]+ba/b[height<=1080]/best",
+    # KIRINUKI と同様に、扱いやすい H.264/mp4 を優先（1080p上限）
+    video_format: str = "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4][vcodec^=avc1]",
     buffer_seconds: float = DEFAULT_BUFFER_SECONDS,
 ) -> bool:
     """
@@ -67,7 +69,7 @@ def download_clip(
         start_time: 開始時刻（hh:mm:ss, mm:ss, もしくは秒）
         end_time: 終了時刻。None の場合は動画末尾まで。
         output_path: 保存するパス（拡張子は自動判定されるが、明示推奨）
-        video_format: yt-dlp の -f 指定
+        video_format: yt-dlp の -f 指定（デフォルトは H.264/mp4 優先）
         buffer_seconds: 前後に足すバッファ（キーフレームのズレ対策）
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
@@ -103,6 +105,11 @@ def _download_with_sections(
         section = f"*{start_label}-inf"
 
     base_path = os.path.splitext(output_path)[0]
+    js_runtime_args = []
+    node_path = shutil.which("node")
+    if node_path:
+        js_runtime_args = ["--js-runtimes", f"node={node_path}"]
+
     cmd = [
         sys.executable,
         "-m",
@@ -115,6 +122,7 @@ def _download_with_sections(
         base_path,
         "--force-keyframes-at-cuts",
         "--force-overwrites",
+        *js_runtime_args,
         video_url,
     ]
 
