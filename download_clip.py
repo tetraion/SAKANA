@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -171,9 +172,70 @@ def _download_with_sections(
     if found != output_path:
         os.rename(found, output_path)
 
+    if output_path.lower().endswith(".mp4"):
+        _ensure_h264_mp4(output_path)
+
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"✓ Downloaded clip saved to {output_path} ({size_mb:.2f} MB)")
     return True
+
+
+def _probe_codec(path: str, stream_selector: str) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                stream_selector,
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=nk=1:nw=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    codec = result.stdout.strip()
+    return codec or None
+
+
+def _ensure_h264_mp4(path: str) -> None:
+    vcodec = _probe_codec(path, "v:0")
+    acodec = _probe_codec(path, "a:0")
+    if vcodec == "h264" and acodec == "aac":
+        return
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+        tmp_path = tmp.name
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-i",
+                path,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-movflags",
+                "+faststart",
+                tmp_path,
+            ],
+            check=True,
+        )
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def main(argv: Optional[list[str]] = None) -> int:

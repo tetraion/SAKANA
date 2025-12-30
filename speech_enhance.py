@@ -46,6 +46,31 @@ def _run(cmd: list[str]) -> None:
     subprocess.run(cmd, check=True)
 
 
+def _probe_codec(path: str, stream_selector: str) -> str | None:
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                stream_selector,
+                "-show_entries",
+                "stream=codec_name",
+                "-of",
+                "default=nk=1:nw=1",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    codec = result.stdout.strip()
+    return codec or None
+
+
 def _extract_audio(input_path: str, wav_path: str) -> None:
     # 16-bit PCM / 48kHz に揃える
     _run(
@@ -117,8 +142,9 @@ def _enhance_with_noisereduce(in_wav: str, out_wav: str) -> None:
 
 
 def _mux_audio_video(video_path: str, audio_path: str, output_path: str) -> None:
-    _run(
-        [
+    vcodec = _probe_codec(video_path, "v:0")
+    if vcodec == "h264":
+        cmd = [
             "ffmpeg",
             "-y",
             "-i",
@@ -131,10 +157,38 @@ def _mux_audio_video(video_path: str, audio_path: str, output_path: str) -> None
             "1:a",
             "-c:v",
             "copy",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
             "-shortest",
             output_path,
         ]
-    )
+    else:
+        # Ensure QuickTime-friendly MP4 even if the source video is VP9/AV1.
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            video_path,
+            "-i",
+            audio_path,
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            "-shortest",
+            output_path,
+        ]
+    _run(cmd)
 
 
 def enhance(
