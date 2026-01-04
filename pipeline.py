@@ -28,7 +28,7 @@ def _default_name_from_url(url: str) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description="Download -> Enhance -> Transcribe -> Cut EDL pipeline")
+    parser = argparse.ArgumentParser(description="Download -> Enhance -> Transcribe -> (Optional) Cut EDL pipeline")
     parser.add_argument("url", help="YouTube URL")
     parser.add_argument("start", help="Start time (hh:mm:ss or mm:ss or seconds)")
     parser.add_argument("end", nargs="?", help="End time (optional; if omitted, runs to end)")
@@ -45,6 +45,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
     parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL")
     parser.add_argument("--gap", type=float, default=0.5, help="Gap threshold for cuts (seconds)")
+    parser.add_argument("--cut", action="store_true", help="Create cut EDL and cut SRT")
     parser.add_argument("--src-tc-base", default="00:00:00:00", help="EDL source TC base")
     parser.add_argument("--rec-tc-base", default="00:00:00:00", help="EDL record TC base")
     args = parser.parse_args(argv)
@@ -57,23 +58,34 @@ def main(argv: Optional[list[str]] = None) -> int:
     srt_out = os.path.join(args.output_dir, f"{base_name}.srt")
     edl_out = os.path.join(args.output_dir, f"{base_name}_cut.edl")
 
-    print("[1/4] Downloading clip...")
-    dl_cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "download_clip.py"),
-        args.url,
-        args.start,
-        downloaded,
-        "--buffer",
-        str(args.buffer),
-        "--format",
-        args.format,
-    ]
-    if args.end:
-        dl_cmd.extend(["--end", args.end])
-    _run(dl_cmd)
+    total_steps = 5 if args.cut else 4
+    step = 1
 
-    print("[2/4] Enhancing speech (BGM reduction)...")
+    def _step(msg: str) -> None:
+        nonlocal step
+        print(f"[{step}/{total_steps}] {msg}")
+        step += 1
+
+    if os.path.exists(downloaded) and os.path.getsize(downloaded) > 0:
+        _step("Downloading clip... (skipped, file exists)")
+    else:
+        _step("Downloading clip...")
+        dl_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "download_clip.py"),
+            args.url,
+            args.start,
+            downloaded,
+            "--buffer",
+            str(args.buffer),
+            "--format",
+            args.format,
+        ]
+        if args.end:
+            dl_cmd.extend(["--end", args.end])
+        _run(dl_cmd)
+
+    _step("Enhancing speech (BGM reduction)...")
     enh_cmd = [
         sys.executable,
         os.path.join(os.path.dirname(__file__), "speech_enhance.py"),
@@ -84,42 +96,58 @@ def main(argv: Optional[list[str]] = None) -> int:
     ]
     _run(enh_cmd)
 
-    print("[3/4] Transcribing to SRT...")
-    tr_cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "transcribe_mlx.py"),
-        enhanced,
-        srt_out,
-        "--language",
-        args.language,
-        "--model",
-        args.model,
-    ]
-    _run(tr_cmd)
+    if os.path.exists(srt_out) and os.path.getsize(srt_out) > 0:
+        _step("Transcribing to SRT... (skipped, file exists)")
+    else:
+        _step("Transcribing to SRT...")
+        tr_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "transcribe_mlx.py"),
+            enhanced,
+            srt_out,
+            "--language",
+            args.language,
+            "--model",
+            args.model,
+        ]
+        _run(tr_cmd)
 
-    print("[4/4] Creating cut EDL and cut SRT...")
-    cut_cmd = [
+    _step("De-duplicating SRT...")
+    dedup_tmp = f"{srt_out}.dedup"
+    dedup_cmd = [
         sys.executable,
-        os.path.join(os.path.dirname(__file__), "srt_to_edl.py"),
+        os.path.join(os.path.dirname(__file__), "srt_dedup.py"),
         srt_out,
-        edl_out,
-        "--fps",
-        str(args.fps),
-        "--gap",
-        str(args.gap),
-        "--src-tc-base",
-        args.src_tc_base,
-        "--rec-tc-base",
-        args.rec_tc_base,
+        dedup_tmp,
     ]
-    _run(cut_cmd)
+    _run(dedup_cmd)
+    os.replace(dedup_tmp, srt_out)
+
+    if args.cut:
+        _step("Creating cut EDL and cut SRT...")
+        cut_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "srt_to_edl.py"),
+            srt_out,
+            edl_out,
+            "--fps",
+            str(args.fps),
+            "--gap",
+            str(args.gap),
+            "--src-tc-base",
+            args.src_tc_base,
+            "--rec-tc-base",
+            args.rec_tc_base,
+        ]
+        _run(cut_cmd)
 
     print("✓ Pipeline complete")
     print(f"  Downloaded: {downloaded}")
     print(f"  Enhanced:   {enhanced}")
     print(f"  SRT:        {srt_out}")
-    print(f"  Cut EDL:    {edl_out}")
-    print(f"  Cut SRT:    {os.path.splitext(edl_out)[0]}_cut.srt")
+    if args.cut:
+        print(f"  Cut EDL:    {edl_out}")
+        print(f"  Cut SRT:    {os.path.splitext(edl_out)[0]}_cut.srt")
 
     return 0
 
