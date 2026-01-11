@@ -61,6 +61,7 @@ def download_clip(
     # KIRINUKI と同様に、扱いやすい H.264/mp4 を優先（1080p上限）
     video_format: str = "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4][vcodec^=avc1]",
     buffer_seconds: float = DEFAULT_BUFFER_SECONDS,
+    mode: str = "precise",
 ) -> bool:
     """
     YouTube から指定区間をダウンロードして保存する。
@@ -75,6 +76,19 @@ def download_clip(
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
+    mode = mode.lower()
+    if mode not in ("fast", "precise"):
+        raise ValueError(f"Invalid mode: {mode} (choose 'fast' or 'precise')")
+
+    if mode == "fast":
+        return _download_full_then_stream_copy(
+            video_url,
+            start_time,
+            end_time,
+            output_path,
+            video_format,
+        )
+
     return _download_with_sections(
         video_url,
         start_time,
@@ -82,6 +96,7 @@ def download_clip(
         output_path,
         video_format,
         buffer_seconds,
+        mode,
     )
 
 
@@ -92,6 +107,7 @@ def _download_with_sections(
     output_path: str,
     video_format: str,
     buffer_seconds: float,
+    mode: str,
 ) -> bool:
     """yt-dlp の --download-sections で指定区間だけを取得。"""
     start_sec = parse_time(start_time)
@@ -121,11 +137,12 @@ def _download_with_sections(
         section,
         "-o",
         base_path,
-        "--force-keyframes-at-cuts",
         "--force-overwrites",
         *js_runtime_args,
         video_url,
     ]
+    if mode == "precise":
+        cmd.insert(cmd.index("--force-overwrites"), "--force-keyframes-at-cuts")
 
     possible_outputs = [
         output_path,
@@ -172,11 +189,81 @@ def _download_with_sections(
     if found != output_path:
         os.rename(found, output_path)
 
-    if output_path.lower().endswith(".mp4"):
+    if mode == "precise" and output_path.lower().endswith(".mp4"):
         _ensure_h264_mp4(output_path)
 
     size_mb = os.path.getsize(output_path) / (1024 * 1024)
     print(f"✓ Downloaded clip saved to {output_path} ({size_mb:.2f} MB)")
+    return True
+
+
+def _download_full_then_stream_copy(
+    video_url: str,
+    start_time: str,
+    end_time: Optional[str],
+    output_path: str,
+    video_format: str,
+) -> bool:
+    """動画全体をダウンロードして、ストリームコピーで切り抜く（再エンコードなし）。"""
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        full_base = os.path.join(tmpdir, "full_video")
+        cmd = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "-f",
+            video_format,
+            "-o",
+            full_base,
+            "--force-overwrites",
+            video_url,
+        ]
+        try:
+            print("Downloading full video...")
+            subprocess.run(cmd, capture_output=True, text=True, check=True)
+        except subprocess.CalledProcessError as exc:
+            error_msg = exc.stderr or exc.stdout or str(exc)
+            print(f"✗ Full download failed: {error_msg}")
+            return False
+
+        candidates = glob.glob(f"{full_base}*")
+        if not candidates:
+            print("✗ Full download output not found")
+            return False
+        candidates.sort(key=os.path.getmtime, reverse=True)
+        full_path = candidates[0]
+
+        print("Clipping with stream copy...")
+        return _clip_stream_copy(full_path, start_time, end_time, output_path)
+
+
+def _clip_stream_copy(
+    input_path: str,
+    start_time: str,
+    end_time: Optional[str],
+    output_path: str,
+) -> bool:
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        start_time,
+        "-i",
+        input_path,
+    ]
+    if end_time:
+        cmd.extend(["-to", end_time])
+    cmd.extend(["-c", "copy", output_path])
+    try:
+        subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as exc:
+        print(f"✗ Stream copy failed: {exc}")
+        return False
+    if not os.path.exists(output_path):
+        print("✗ Stream copy output not found")
+        return False
     return True
 
 
@@ -260,6 +347,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         default="bv*[height<=1080]+ba/b[height<=1080]/best",
         help="yt-dlp format string (default keeps up to 1080p)",
     )
+    parser.add_argument(
+        "--mode",
+        choices=["fast", "precise"],
+        default="precise",
+        help="precise: keyframe cut + h264 mp4 ensure, fast: full download + stream copy",
+    )
 
     args = parser.parse_args(argv)
 
@@ -270,6 +363,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         args.output,
         video_format=args.format,
         buffer_seconds=args.buffer,
+        mode=args.mode,
     )
     return 0 if ok else 1
 

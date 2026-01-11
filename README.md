@@ -60,3 +60,21 @@ python speech_enhance.py input_video.mp4 enhanced.wav --audio-only
   3. SRT を生成
 
 ※ Apple Silicon 以外では遅い/動かない可能性があります。mlx-whisper が無い場合はエラーで案内を出します。
+
+## 複数区間のパイプライン（segments.txt）
+同一動画から複数区間を切り抜いて順番に処理します。動画は一度だけ取得し、各区間を正確に切り出します。
+
+`segments.txt` 例:
+```
+# start end name(optional)
+00:01:23 00:02:34 intro
+00:10:00 00:11:10 chorus
+00:20:00
+```
+
+実行:
+```bash
+python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt
+```
+
+出力は `output/<video_id>/` 配下にまとめられます（`<video_id>_full.mp4`, `<video_id>_01_src.mp4` など）。
