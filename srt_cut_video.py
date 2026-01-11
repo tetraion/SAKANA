@@ -1,0 +1,308 @@
+#!/usr/bin/env python3
+"""
+Cut a video by keeping only SRT cue intervals (remove gaps).
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import math
+import re
+import subprocess
+from dataclasses import dataclass
+from typing import List, Sequence
+
+
+TIME_RE = re.compile(r"(?P<start>[\d:,]+)\s+-->\s+(?P<end>[\d:,]+)")
+
+
+@dataclass
+class Cue:
+    start: float
+    end: float
+    text: str | None = None
+
+
+def _run(cmd: Sequence[str]) -> None:
+    subprocess.run(cmd, check=True)
+
+
+def _time_to_seconds(t: str) -> float:
+    h, m, rest = t.split(":")
+    s, ms = rest.split(",")
+    return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+
+def _seconds_to_time(sec: float) -> str:
+    sec = max(0.0, sec)
+    h = int(sec // 3600)
+    m = int((sec % 3600) // 60)
+    s = int(sec % 60)
+    ms = int(round((sec - int(sec)) * 1000))
+    if ms >= 1000:
+        s += 1
+        ms -= 1000
+    if s >= 60:
+        m += 1
+        s -= 60
+    if m >= 60:
+        h += 1
+        m -= 60
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _seconds_to_frame(seconds: float, fps: float, mode: str) -> int:
+    value = seconds * fps
+    if mode == "floor":
+        return int(math.floor(value))
+    if mode == "ceil":
+        return int(math.ceil(value))
+    return int(round(value))
+
+
+def _frames_to_tc(total_frames: int, fps: float) -> str:
+    frames = total_frames % int(fps)
+    secs = total_frames // int(fps)
+    s = secs % 60
+    m = (secs // 60) % 60
+    h = secs // 3600
+    return f"{h:02d}:{m:02d}:{s:02d}:{frames:02d}"
+
+
+def _probe_duration(path: str) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=nokey=1:noprint_wrappers=1",
+        path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return float(result.stdout.strip())
+
+
+def _parse_srt(path: str) -> List[Cue]:
+    content = open(path, "r", encoding="utf-8").read()
+    blocks = content.strip().split("\n\n")
+    cues: List[Cue] = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 2:
+            continue
+        m = TIME_RE.search(lines[1])
+        if not m:
+            continue
+        start = _time_to_seconds(m.group("start"))
+        end = _time_to_seconds(m.group("end"))
+        if end > start:
+            text = "\n".join(lines[2:]).strip()
+            cues.append(Cue(start=start, end=end, text=text))
+    return cues
+
+
+def _merge_close(cues: List[Cue], gap: float) -> List[Cue]:
+    if not cues:
+        return []
+    cues = sorted(cues, key=lambda c: (c.start, c.end))
+    merged: List[Cue] = [cues[0]]
+    for cue in cues[1:]:
+        prev = merged[-1]
+        if cue.start <= prev.end + gap:
+            prev.end = max(prev.end, cue.end)
+        else:
+            merged.append(Cue(start=cue.start, end=cue.end, text=cue.text))
+    return merged
+
+
+def _format_srt(cues: List[Cue]) -> str:
+    lines: List[str] = []
+    for idx, cue in enumerate(cues, start=1):
+        lines.append(str(idx))
+        lines.append(f"{_seconds_to_time(cue.start)} --> {_seconds_to_time(cue.end)}")
+        lines.append(cue.text or "")
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _build_filter(cues: List[Cue]) -> str:
+    parts: List[str] = []
+    for idx, cue in enumerate(cues):
+        start = f"{cue.start:.3f}"
+        end = f"{cue.end:.3f}"
+        parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[v{idx}]")
+        parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[a{idx}]")
+    concat_inputs = "".join([f"[v{idx}][a{idx}]" for idx in range(len(cues))])
+    parts.append(f"{concat_inputs}concat=n={len(cues)}:v=1:a=1[outv][outa]")
+    return ";".join(parts)
+
+
+def _expand_cues(cues: List[Cue], pad: float) -> List[Cue]:
+    if pad <= 0:
+        return cues
+    expanded: List[Cue] = []
+    for cue in cues:
+        expanded.append(
+            Cue(start=max(0.0, cue.start - pad), end=cue.end + pad, text=cue.text)
+        )
+    return expanded
+
+
+def _clamp_cues(cues: List[Cue], duration: float) -> List[Cue]:
+    clamped: List[Cue] = []
+    for cue in cues:
+        start = max(0.0, cue.start)
+        end = min(duration, cue.end)
+        if end <= start:
+            continue
+        clamped.append(Cue(start=start, end=end, text=cue.text))
+    return clamped
+
+
+def _build_timeline_map(segments: List[Cue]) -> List[tuple[float, float, float]]:
+    mapped: List[tuple[float, float, float]] = []
+    cursor = 0.0
+    for seg in segments:
+        mapped.append((seg.start, seg.end, cursor))
+        cursor += seg.end - seg.start
+    return mapped
+
+
+def _write_edl(
+    segments: List[Cue],
+    input_path: str,
+    output_path: str,
+    fps: float,
+) -> None:
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    lines = [f"TITLE: {base}", "FCM: NON-DROP FRAME", ""]
+    cursor_frames = 0
+    for idx, seg in enumerate(segments, start=1):
+        src_in_f = _seconds_to_frame(seg.start, fps, "floor")
+        src_out_f = _seconds_to_frame(seg.end, fps, "ceil")
+        if src_out_f <= src_in_f:
+            src_out_f = src_in_f + 1
+        rec_in_f = cursor_frames
+        rec_out_f = cursor_frames + (src_out_f - src_in_f)
+        src_in = _frames_to_tc(src_in_f, fps)
+        src_out = _frames_to_tc(src_out_f, fps)
+        rec_in = _frames_to_tc(rec_in_f, fps)
+        rec_out = _frames_to_tc(rec_out_f, fps)
+        line = f"{idx:03d}  {base[:8]:<8} V     C        {src_in} {src_out} {rec_in} {rec_out}"
+        lines.append(line)
+        cursor_frames = rec_out_f
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+
+def _map_cues_to_timeline(cues: List[Cue], segments: List[Cue]) -> List[Cue]:
+    mapped = _build_timeline_map(segments)
+    out: List[Cue] = []
+    for cue in cues:
+        for seg_start, seg_end, seg_offset in mapped:
+            if cue.end <= seg_start or cue.start >= seg_end:
+                continue
+            start = max(cue.start, seg_start)
+            end = min(cue.end, seg_end)
+            new_start = seg_offset + (start - seg_start)
+            new_end = seg_offset + (end - seg_start)
+            out.append(Cue(start=new_start, end=new_end, text=cue.text))
+            break
+    return out
+
+
+def cut_video(
+    srt_path: str,
+    input_path: str,
+    output_path: str,
+    srt_out: str | None,
+    edl_out: str | None,
+    fps: float,
+    merge_gap: float,
+    pad: float,
+    crf: int,
+    preset: str,
+) -> None:
+    cues = _parse_srt(srt_path)
+    duration = _probe_duration(input_path)
+    padded = _expand_cues(cues, pad=pad)
+    padded = _clamp_cues(padded, duration)
+    segments = _merge_close(padded, gap=merge_gap)
+    segments = _clamp_cues(segments, duration)
+    if not segments:
+        raise SystemExit("✗ No valid cues found in SRT.")
+
+    filter_complex = _build_filter(segments)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-filter_complex",
+        filter_complex,
+        "-map",
+        "[outv]",
+        "-map",
+        "[outa]",
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(crf),
+        "-preset",
+        preset,
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    _run(cmd)
+
+    if srt_out:
+        mapped = _map_cues_to_timeline(padded, segments)
+        with open(srt_out, "w", encoding="utf-8") as fh:
+            fh.write(_format_srt(mapped))
+    if edl_out:
+        _write_edl(segments, input_path=input_path, output_path=edl_out, fps=fps)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Cut video by keeping SRT cue intervals")
+    parser.add_argument("srt", help="Input SRT path")
+    parser.add_argument("input", help="Input video path")
+    parser.add_argument("output", help="Output video path")
+    parser.add_argument("--srt-out", help="Output SRT aligned to cut video")
+    parser.add_argument("--edl", help="Output EDL path (CMX3600)")
+    parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL timecode")
+    parser.add_argument("--merge-gap", type=float, default=0.15, help="Merge gaps shorter than this (seconds)")
+    parser.add_argument("--pad", type=float, default=0.0, help="Extend each cue by this many seconds on both ends")
+    parser.add_argument("--crf", type=int, default=20, help="x264 CRF (lower is higher quality)")
+    parser.add_argument("--preset", default="veryfast", help="x264 preset")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.srt):
+        raise SystemExit(f"✗ SRT not found: {args.srt}")
+    if not os.path.exists(args.input):
+        raise SystemExit(f"✗ Input not found: {args.input}")
+
+    cut_video(
+        args.srt,
+        args.input,
+        args.output,
+        srt_out=args.srt_out,
+        edl_out=args.edl,
+        fps=args.fps,
+        merge_gap=args.merge_gap,
+        pad=args.pad,
+        crf=args.crf,
+        preset=args.preset,
+    )
+    print(f"✓ Cut video saved to {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

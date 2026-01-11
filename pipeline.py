@@ -30,8 +30,8 @@ def _default_name_from_url(url: str) -> str:
     return tail.split("?")[0] or "clip"
 
 
-def _read_segments(path: str) -> list[tuple[str, Optional[str], Optional[str]]]:
-    segments: list[tuple[str, Optional[str], Optional[str]]] = []
+def _read_segments(path: str) -> list[tuple[str, Optional[str], Optional[str], dict[str, str]]]:
+    segments: list[tuple[str, Optional[str], Optional[str], dict[str, str]]] = []
     with open(path, "r", encoding="utf-8") as fh:
         for raw in fh:
             line = raw.split("#", 1)[0].strip()
@@ -41,13 +41,28 @@ def _read_segments(path: str) -> list[tuple[str, Optional[str], Optional[str]]]:
             if not parts:
                 continue
             if len(parts) == 1:
-                start, end, name = parts[0], None, None
+                start, end, name, opts = parts[0], None, None, {}
             elif len(parts) == 2:
-                start, end, name = parts[0], parts[1], None
+                start, end, name, opts = parts[0], parts[1], None, {}
             else:
                 start, end = parts[0], parts[1]
-                name = " ".join(parts[2:])
-            segments.append((start, end, name))
+                name_tokens: list[str] = []
+                opts: dict[str, str] = {}
+                options_started = False
+                for token in parts[2:]:
+                    if ("=" in token) or token.startswith("--"):
+                        options_started = True
+                    if options_started:
+                        keyval = token.lstrip("-")
+                        if "=" in keyval:
+                            key, value = keyval.split("=", 1)
+                            opts[key] = value
+                        else:
+                            opts[keyval] = "true"
+                    else:
+                        name_tokens.append(token)
+                name = " ".join(name_tokens) if name_tokens else None
+            segments.append((start, end, name, opts))
     return segments
 
 
@@ -150,6 +165,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL")
     parser.add_argument("--gap", type=float, default=0.5, help="Gap threshold for cuts (seconds)")
     parser.add_argument("--cut", action="store_true", help="Create cut EDL and cut SRT")
+    parser.add_argument("--post-process", action="store_true", help="Trim words + cut video (post process)")
+    parser.add_argument("--words-model", default="large", help="Whisper model for word timestamps")
+    parser.add_argument("--words-language", default="ja", help="Language code for word timestamps")
+    parser.add_argument("--words-device", default="cpu", help="Device for word timestamps (cpu/cuda/mps)")
+    parser.add_argument("--words-compute-type", default="int8", help="Compute type for word timestamps")
+    parser.add_argument("--words-beam", type=int, default=5, help="Beam size for word timestamps")
+    parser.add_argument("--cut-pad", type=float, default=0.12, help="Pad seconds for cut video cues")
+    parser.add_argument("--cut-merge-gap", type=float, default=0.3, help="Merge gaps shorter than this in cut video")
+    parser.add_argument("--cut-crf", type=int, default=20, help="CRF for cut video")
+    parser.add_argument("--cut-preset", default="veryfast", help="x264 preset for cut video")
+    parser.add_argument("--cut-edl", action="store_true", help="Output EDL when cutting video")
     parser.add_argument("--src-tc-base", default="00:00:00:00", help="EDL source TC base")
     parser.add_argument("--rec-tc-base", default="00:00:00:00", help="EDL record TC base")
     parser.add_argument("--segments", help="Segments list file (start end [name])")
@@ -179,7 +205,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("Downloading full video once...")
             _download_full_video(args.url, full_path, args.format)
 
-        for idx, (start, end, name) in enumerate(segments, start=1):
+        for idx, (start, end, name, seg_opts) in enumerate(segments, start=1):
             label = f"{idx:02d}"
             suffix = f"_{_slugify(name)}" if name else ""
             clip_base = f"{base_name}_{label}{suffix}"
@@ -188,6 +214,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             enhanced = os.path.join(output_dir, f"{clip_base}_enh.mp4")
             srt_out = os.path.join(output_dir, f"{clip_base}.srt")
             edl_out = os.path.join(output_dir, f"{clip_base}_cut.edl")
+            words_json = os.path.join(output_dir, f"{clip_base}_words.json")
+            words_trimmed = os.path.join(output_dir, f"{clip_base}_words_trimmed.srt")
+            cut_video = os.path.join(output_dir, f"{clip_base}_cut.mp4")
+            cut_srt = os.path.join(output_dir, f"{clip_base}_cut.srt")
+            cut_edl = os.path.join(output_dir, f"{clip_base}_cut.edl")
 
             if os.path.exists(downloaded) and os.path.getsize(downloaded) > 0:
                 print(f"[{label}] Clip exists, skipping cut.")
@@ -251,6 +282,75 @@ def main(argv: Optional[list[str]] = None) -> int:
                 ]
                 _run(cut_cmd)
 
+            do_post = args.post_process
+            if seg_opts.get("trim_words"):
+                do_post = seg_opts.get("trim_words", "").lower() in ("1", "true", "yes", "on")
+
+            if do_post:
+                if os.path.exists(words_json) and os.path.getsize(words_json) > 0:
+                    print(f"[{label}] Word timestamps... (skipped, file exists)")
+                else:
+                    print(f"[{label}] Word timestamps...")
+                    ww_cmd = [
+                        sys.executable,
+                        os.path.join(os.path.dirname(__file__), "whisper_words.py"),
+                        enhanced,
+                        words_json,
+                        "--model",
+                        seg_opts.get("words_model", args.words_model),
+                        "--language",
+                        seg_opts.get("words_language", args.words_language),
+                        "--device",
+                        seg_opts.get("words_device", args.words_device),
+                        "--compute-type",
+                        seg_opts.get("words_compute_type", args.words_compute_type),
+                        "--beam",
+                        str(int(seg_opts.get("words_beam", args.words_beam))),
+                    ]
+                    _run(ww_cmd)
+
+                print(f"[{label}] Trimming SRT by words...")
+                trim_cmd = [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "srt_trim_words.py"),
+                    srt_out,
+                    words_json,
+                    words_trimmed,
+                ]
+                _run(trim_cmd)
+
+            do_cut_video = do_post
+            if seg_opts.get("cut_video"):
+                do_cut_video = seg_opts.get("cut_video", "").lower() in ("1", "true", "yes", "on")
+
+            if do_cut_video:
+                print(f"[{label}] Cutting video by SRT cues...")
+                pad = float(seg_opts.get("pad", args.cut_pad))
+                merge_gap = float(seg_opts.get("merge_gap", args.cut_merge_gap))
+                crf = int(seg_opts.get("crf", args.cut_crf))
+                preset = seg_opts.get("preset", args.cut_preset)
+                srt_input = words_trimmed if os.path.exists(words_trimmed) else srt_out
+                cut_cmd = [
+                    sys.executable,
+                    os.path.join(os.path.dirname(__file__), "srt_cut_video.py"),
+                    srt_input,
+                    downloaded,
+                    cut_video,
+                    "--srt-out",
+                    cut_srt,
+                    "--merge-gap",
+                    str(merge_gap),
+                    "--pad",
+                    str(pad),
+                    "--crf",
+                    str(crf),
+                    "--preset",
+                    preset,
+                ]
+                if args.cut_edl or seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on"):
+                    cut_cmd.extend(["--edl", cut_edl])
+                _run(cut_cmd)
+
             print(f"[{label}] ✓ Done: {clip_base}")
 
         print("✓ Pipeline complete (multi-segment)")
@@ -261,6 +361,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     enhanced = os.path.join(output_dir, f"{base_name}_enh.mp4")
     srt_out = os.path.join(output_dir, f"{base_name}.srt")
     edl_out = os.path.join(output_dir, f"{base_name}_cut.edl")
+    words_json = os.path.join(output_dir, f"{base_name}_words.json")
+    words_trimmed = os.path.join(output_dir, f"{base_name}_words_trimmed.srt")
+    cut_video = os.path.join(output_dir, f"{base_name}_cut.mp4")
+    cut_srt = os.path.join(output_dir, f"{base_name}_cut.srt")
+    cut_edl = os.path.join(output_dir, f"{base_name}_cut.edl")
 
     total_steps = 5 if args.cut else 4
     step = 1
@@ -347,6 +452,63 @@ def main(argv: Optional[list[str]] = None) -> int:
         ]
         _run(cut_cmd)
 
+    if args.post_process:
+        if os.path.exists(words_json) and os.path.getsize(words_json) > 0:
+            _step("Word timestamps... (skipped, file exists)")
+        else:
+            _step("Word timestamps...")
+            ww_cmd = [
+                sys.executable,
+                os.path.join(os.path.dirname(__file__), "whisper_words.py"),
+                enhanced,
+                words_json,
+                "--model",
+                args.words_model,
+                "--language",
+                args.words_language,
+                "--device",
+                args.words_device,
+                "--compute-type",
+                args.words_compute_type,
+                "--beam",
+                str(args.words_beam),
+            ]
+            _run(ww_cmd)
+
+        _step("Trimming SRT by words...")
+        trim_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "srt_trim_words.py"),
+            srt_out,
+            words_json,
+            words_trimmed,
+        ]
+        _run(trim_cmd)
+
+    if args.post_process:
+        _step("Cutting video by SRT cues...")
+        srt_input = words_trimmed if os.path.exists(words_trimmed) else srt_out
+        cut_cmd = [
+            sys.executable,
+            os.path.join(os.path.dirname(__file__), "srt_cut_video.py"),
+            srt_input,
+            downloaded,
+            cut_video,
+            "--srt-out",
+            cut_srt,
+            "--merge-gap",
+            str(args.cut_merge_gap),
+            "--pad",
+            str(args.cut_pad),
+            "--crf",
+            str(args.cut_crf),
+            "--preset",
+            args.cut_preset,
+        ]
+        if args.cut_edl:
+            cut_cmd.extend(["--edl", cut_edl])
+        _run(cut_cmd)
+
     print("✓ Pipeline complete")
     print(f"  Downloaded: {downloaded}")
     print(f"  Enhanced:   {enhanced}")
@@ -354,6 +516,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     if args.cut:
         print(f"  Cut EDL:    {edl_out}")
         print(f"  Cut SRT:    {os.path.splitext(edl_out)[0]}_cut.srt")
+    if args.post_process:
+        print(f"  Words JSON: {words_json}")
+        print(f"  Words SRT:  {words_trimmed}")
+    if args.post_process:
+        print(f"  Cut Video:  {cut_video}")
+        print(f"  Cut SRT:    {cut_srt}")
+        if args.cut_edl:
+            print(f"  Cut EDL:    {cut_edl}")
 
     return 0
 

@@ -74,7 +74,51 @@ python speech_enhance.py input_video.mp4 enhanced.wav --audio-only
 
 実行:
 ```bash
-python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt
+python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt --post-process --cut-edl
 ```
 
 出力は `output/<video_id>/` 配下にまとめられます（`<video_id>_full.mp4`, `<video_id>_01_src.mp4` など）。
+
+### segments.txt でのオプション指定
+区間ごとに `key=value` を追加できます（例: `pad=0.12 merge_gap=0.3 cut_video=1 edl=1`）。
+```
+# start end name(optional) [options...]
+// options: trim_words=1 cut_video=1 edl=1 pad=0.12 merge_gap=0.3 words_model=large words_language=ja words_device=cpu words_compute_type=int8 words_beam=5 cut_crf=20 cut_preset=veryfast
+00:16:44 00:25:19 intro pad=0.12 merge_gap=0.3 trim_words=1 cut_video=1 edl=1
+```
+
+## 単語タイムスタンプで字幕の開始/終了を詰める
+「えーと」等のフィラーが音声にはあるが字幕に無い場合、単語タイムスタンプを使って
+字幕の開始/終了を話された単語に合わせて詰めます。
+
+### 1) 単語タイムスタンプJSONを作る（faster-whisper）
+```bash
+.venv/bin/python whisper_words.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_enh.mp4 \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_words.json \
+  --model small --language ja
+```
+
+### 2) SRTを詰める
+```bash
+# words JSON は segments[].words[] を含む形式を想定
+python srt_trim_words.py output/ui1MX5M_2D0/ui1MX5M_2D0_01.srt \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_words.json \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_words_trimmed.srt
+```
+
+## SRTの空白区間をカットして動画を短くする
+SRTのキュー間の「字幕が出ていない区間」を切り落として動画を短くします。
+
+```bash
+python srt_cut_video.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_words_trimmed.srt \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_src.mp4 \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.mp4
+```
+
+EDLも出す場合:
+```bash
+python srt_cut_video.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_words_trimmed.srt \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_src.mp4 \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.mp4 \
+  --edl output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.edl --fps 30
+```

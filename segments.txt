@@ -1,3 +1,9 @@
-# start end name(optional)
-00:16:44 00:25:19 
+# start end name(optional) [options...]
+# options (key=value):
+#   trim_words=1|0         word timestampsでSRTの開始/終了を詰める
+#   cut_video=1|0          SRTの空白区間をカットして動画を短くする
+#   edl=1|0                カット用のEDLを出力
+#   pad=0.12               カット時に前後へ足す秒数
+#   merge_gap=0.3          この秒数以下の隙間はカットせず残す
+00:16:44 00:25:19
 00:43:24 00:53:31
