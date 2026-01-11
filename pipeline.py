@@ -30,12 +30,16 @@ def _default_name_from_url(url: str) -> str:
     return tail.split("?")[0] or "clip"
 
 
-def _read_segments(path: str) -> list[tuple[str, Optional[str], Optional[str], dict[str, str]]]:
+def _read_segments(path: str) -> tuple[Optional[str], list[tuple[str, Optional[str], Optional[str], dict[str, str]]]]:
     segments: list[tuple[str, Optional[str], Optional[str], dict[str, str]]] = []
+    url: Optional[str] = None
     with open(path, "r", encoding="utf-8") as fh:
         for raw in fh:
             line = raw.split("#", 1)[0].strip()
             if not line:
+                continue
+            if line.lower().startswith("url="):
+                url = line.split("=", 1)[-1].strip()
                 continue
             parts = line.split()
             if not parts:
@@ -63,7 +67,7 @@ def _read_segments(path: str) -> list[tuple[str, Optional[str], Optional[str], d
                         name_tokens.append(token)
                 name = " ".join(name_tokens) if name_tokens else None
             segments.append((start, end, name, opts))
-    return segments
+    return url, segments
 
 
 def _slugify(name: str) -> str:
@@ -142,7 +146,7 @@ def _clip_from_full(
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Download -> Enhance -> Transcribe -> (Optional) Cut EDL pipeline")
-    parser.add_argument("url", help="YouTube URL")
+    parser.add_argument("url", nargs="?", help="YouTube URL (optional if provided in segments.txt)")
     parser.add_argument("start", nargs="?", help="Start time (hh:mm:ss or mm:ss or seconds)")
     parser.add_argument("end", nargs="?", help="End time (optional; if omitted, runs to end)")
     parser.add_argument("--output-dir", default="output", help="Output directory (default: output)")
@@ -162,10 +166,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--enhance-method", choices=["noisereduce", "deepfilternet"], default="noisereduce")
     parser.add_argument("--language", default="ja", help="Whisper language code")
     parser.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
-    parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL")
     parser.add_argument("--gap", type=float, default=0.5, help="Gap threshold for cuts (seconds)")
-    parser.add_argument("--cut", action="store_true", help="Create cut EDL and cut SRT")
-    parser.add_argument("--post-process", action="store_true", help="Trim words + cut video (post process)")
     parser.add_argument("--words-model", default="large", help="Whisper model for word timestamps")
     parser.add_argument("--words-language", default="ja", help="Language code for word timestamps")
     parser.add_argument("--words-device", default="cpu", help="Device for word timestamps (cpu/cuda/mps)")
@@ -175,26 +176,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--cut-merge-gap", type=float, default=0.3, help="Merge gaps shorter than this in cut video")
     parser.add_argument("--cut-crf", type=int, default=20, help="CRF for cut video")
     parser.add_argument("--cut-preset", default="veryfast", help="x264 preset for cut video")
-    parser.add_argument("--cut-edl", action="store_true", help="Output EDL when cutting video")
-    parser.add_argument("--src-tc-base", default="00:00:00:00", help="EDL source TC base")
-    parser.add_argument("--rec-tc-base", default="00:00:00:00", help="EDL record TC base")
     parser.add_argument("--segments", help="Segments list file (start end [name])")
     args = parser.parse_args(argv)
 
     if not args.segments and not args.start:
         parser.error("start time is required unless --segments is provided")
 
-    base_name = args.name or _default_name_from_url(args.url)
-
+    url = args.url
     if args.segments:
+        seg_url, segments = _read_segments(args.segments)
+        if not url:
+            url = seg_url
+        if not url:
+            raise SystemExit("URL is required (pass as arg or set url=... in segments.txt)")
+        base_name = args.name or _default_name_from_url(url)
         output_dir = os.path.join(args.output_dir, base_name)
     else:
+        if not url:
+            raise SystemExit("URL is required.")
+        base_name = args.name or _default_name_from_url(url)
         output_dir = args.output_dir
 
     os.makedirs(output_dir, exist_ok=True)
 
     if args.segments:
-        segments = _read_segments(args.segments)
         if not segments:
             raise SystemExit("No segments found in segments file")
 
@@ -203,7 +208,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print("Full download exists, skipping download.")
         else:
             print("Downloading full video once...")
-            _download_full_video(args.url, full_path, args.format)
+            _download_full_video(url, full_path, args.format)
 
         for idx, (start, end, name, seg_opts) in enumerate(segments, start=1):
             label = f"{idx:02d}"
@@ -213,7 +218,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             downloaded = os.path.join(output_dir, f"{clip_base}_src.mp4")
             enhanced = os.path.join(output_dir, f"{clip_base}_enh.mp4")
             srt_out = os.path.join(output_dir, f"{clip_base}.srt")
-            edl_out = os.path.join(output_dir, f"{clip_base}_cut.edl")
             words_json = os.path.join(output_dir, f"{clip_base}_words.json")
             words_trimmed = os.path.join(output_dir, f"{clip_base}_words_trimmed.srt")
             cut_video = os.path.join(output_dir, f"{clip_base}_cut.mp4")
@@ -264,25 +268,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             _run(dedup_cmd)
             os.replace(dedup_tmp, srt_out)
 
-            if args.cut:
-                print(f"[{label}] Creating cut EDL and cut SRT...")
-                cut_cmd = [
-                    sys.executable,
-                    os.path.join(os.path.dirname(__file__), "srt_to_edl.py"),
-                    srt_out,
-                    edl_out,
-                    "--fps",
-                    str(args.fps),
-                    "--gap",
-                    str(args.gap),
-                    "--src-tc-base",
-                    args.src_tc_base,
-                    "--rec-tc-base",
-                    args.rec_tc_base,
-                ]
-                _run(cut_cmd)
-
-            do_post = args.post_process
+            do_post = False
             if seg_opts.get("trim_words"):
                 do_post = seg_opts.get("trim_words", "").lower() in ("1", "true", "yes", "on")
 
@@ -319,7 +305,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 ]
                 _run(trim_cmd)
 
-            do_cut_video = do_post
+            do_cut_video = False
             if seg_opts.get("cut_video"):
                 do_cut_video = seg_opts.get("cut_video", "").lower() in ("1", "true", "yes", "on")
 
@@ -347,7 +333,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "--preset",
                     preset,
                 ]
-                if args.cut_edl or seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on"):
+                if seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on"):
                     cut_cmd.extend(["--edl", cut_edl])
                 _run(cut_cmd)
 
@@ -360,14 +346,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     downloaded = os.path.join(output_dir, f"{base_name}_src.mp4")
     enhanced = os.path.join(output_dir, f"{base_name}_enh.mp4")
     srt_out = os.path.join(output_dir, f"{base_name}.srt")
-    edl_out = os.path.join(output_dir, f"{base_name}_cut.edl")
     words_json = os.path.join(output_dir, f"{base_name}_words.json")
     words_trimmed = os.path.join(output_dir, f"{base_name}_words_trimmed.srt")
     cut_video = os.path.join(output_dir, f"{base_name}_cut.mp4")
     cut_srt = os.path.join(output_dir, f"{base_name}_cut.srt")
     cut_edl = os.path.join(output_dir, f"{base_name}_cut.edl")
 
-    total_steps = 5 if args.cut else 4
+    total_steps = 4
     step = 1
 
     def _step(msg: str) -> None:
@@ -382,7 +367,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         dl_cmd = [
             sys.executable,
             os.path.join(os.path.dirname(__file__), "download_clip.py"),
-            args.url,
+            url,
             args.start,
             downloaded,
             "--buffer",
@@ -434,96 +419,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     _run(dedup_cmd)
     os.replace(dedup_tmp, srt_out)
 
-    if args.cut:
-        _step("Creating cut EDL and cut SRT...")
-        cut_cmd = [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), "srt_to_edl.py"),
-            srt_out,
-            edl_out,
-            "--fps",
-            str(args.fps),
-            "--gap",
-            str(args.gap),
-            "--src-tc-base",
-            args.src_tc_base,
-            "--rec-tc-base",
-            args.rec_tc_base,
-        ]
-        _run(cut_cmd)
-
-    if args.post_process:
-        if os.path.exists(words_json) and os.path.getsize(words_json) > 0:
-            _step("Word timestamps... (skipped, file exists)")
-        else:
-            _step("Word timestamps...")
-            ww_cmd = [
-                sys.executable,
-                os.path.join(os.path.dirname(__file__), "whisper_words.py"),
-                enhanced,
-                words_json,
-                "--model",
-                args.words_model,
-                "--language",
-                args.words_language,
-                "--device",
-                args.words_device,
-                "--compute-type",
-                args.words_compute_type,
-                "--beam",
-                str(args.words_beam),
-            ]
-            _run(ww_cmd)
-
-        _step("Trimming SRT by words...")
-        trim_cmd = [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), "srt_trim_words.py"),
-            srt_out,
-            words_json,
-            words_trimmed,
-        ]
-        _run(trim_cmd)
-
-    if args.post_process:
-        _step("Cutting video by SRT cues...")
-        srt_input = words_trimmed if os.path.exists(words_trimmed) else srt_out
-        cut_cmd = [
-            sys.executable,
-            os.path.join(os.path.dirname(__file__), "srt_cut_video.py"),
-            srt_input,
-            downloaded,
-            cut_video,
-            "--srt-out",
-            cut_srt,
-            "--merge-gap",
-            str(args.cut_merge_gap),
-            "--pad",
-            str(args.cut_pad),
-            "--crf",
-            str(args.cut_crf),
-            "--preset",
-            args.cut_preset,
-        ]
-        if args.cut_edl:
-            cut_cmd.extend(["--edl", cut_edl])
-        _run(cut_cmd)
-
     print("✓ Pipeline complete")
     print(f"  Downloaded: {downloaded}")
     print(f"  Enhanced:   {enhanced}")
     print(f"  SRT:        {srt_out}")
-    if args.cut:
-        print(f"  Cut EDL:    {edl_out}")
-        print(f"  Cut SRT:    {os.path.splitext(edl_out)[0]}_cut.srt")
-    if args.post_process:
-        print(f"  Words JSON: {words_json}")
-        print(f"  Words SRT:  {words_trimmed}")
-    if args.post_process:
-        print(f"  Cut Video:  {cut_video}")
-        print(f"  Cut SRT:    {cut_srt}")
-        if args.cut_edl:
-            print(f"  Cut EDL:    {cut_edl}")
+    # post-process is driven by segments.txt options only
 
     return 0
 

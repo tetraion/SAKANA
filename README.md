@@ -66,6 +66,7 @@ python speech_enhance.py input_video.mp4 enhanced.wav --audio-only
 
 `segments.txt` 例:
 ```
+# url=YOUTUBE_URL
 # start end name(optional)
 00:01:23 00:02:34 intro
 00:10:00 00:11:10 chorus
@@ -74,7 +75,7 @@ python speech_enhance.py input_video.mp4 enhanced.wav --audio-only
 
 実行:
 ```bash
-python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt --post-process --cut-edl
+python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt
 ```
 
 出力は `output/<video_id>/` 配下にまとめられます（`<video_id>_full.mp4`, `<video_id>_01_src.mp4` など）。
