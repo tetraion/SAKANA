@@ -334,7 +334,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     preset,
                 ]
                 if seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on"):
-                    cut_cmd.extend(["--edl", cut_edl])
+                    cut_cmd.extend(["--edl", cut_edl, "--snap-srt"])
                 _run(cut_cmd)
 
             print(f"[{label}] ✓ Done: {clip_base}")

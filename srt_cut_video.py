@@ -70,6 +70,11 @@ def _frames_to_tc(total_frames: int, fps: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}:{frames:02d}"
 
 
+def _snap_to_fps(sec: float, fps: float, mode: str) -> float:
+    frames = _seconds_to_frame(sec, fps, mode)
+    return frames / fps
+
+
 def _probe_duration(path: str) -> float:
     cmd = [
         "ffprobe",
@@ -118,11 +123,16 @@ def _merge_close(cues: List[Cue], gap: float) -> List[Cue]:
     return merged
 
 
-def _format_srt(cues: List[Cue]) -> str:
+def _format_srt(cues: List[Cue], snap_fps: float | None = None) -> str:
     lines: List[str] = []
     for idx, cue in enumerate(cues, start=1):
+        start = cue.start
+        end = cue.end
+        if snap_fps:
+            start = _snap_to_fps(start, snap_fps, "floor")
+            end = _snap_to_fps(end, snap_fps, "ceil")
         lines.append(str(idx))
-        lines.append(f"{_seconds_to_time(cue.start)} --> {_seconds_to_time(cue.end)}")
+        lines.append(f"{_seconds_to_time(start)} --> {_seconds_to_time(end)}")
         lines.append(cue.text or "")
         lines.append("")
     return "\n".join(lines).strip() + "\n"
@@ -176,24 +186,29 @@ def _write_edl(
     input_path: str,
     output_path: str,
     fps: float,
+    reel_name: str | None,
 ) -> None:
     base = os.path.splitext(os.path.basename(input_path))[0]
+    reel = (reel_name or base)[:8]
     lines = [f"TITLE: {base}", "FCM: NON-DROP FRAME", ""]
-    cursor_frames = 0
+    cursor_seconds = 0.0
     for idx, seg in enumerate(segments, start=1):
-        src_in_f = _seconds_to_frame(seg.start, fps, "floor")
-        src_out_f = _seconds_to_frame(seg.end, fps, "ceil")
+        src_in_f = _seconds_to_frame(seg.start, fps, "round")
+        src_out_f = _seconds_to_frame(seg.end, fps, "round")
         if src_out_f <= src_in_f:
             src_out_f = src_in_f + 1
-        rec_in_f = cursor_frames
-        rec_out_f = cursor_frames + (src_out_f - src_in_f)
+        rec_in_f = _seconds_to_frame(cursor_seconds, fps, "round")
+        cursor_seconds += seg.end - seg.start
+        rec_out_f = _seconds_to_frame(cursor_seconds, fps, "round")
+        if rec_out_f <= rec_in_f:
+            rec_out_f = rec_in_f + 1
         src_in = _frames_to_tc(src_in_f, fps)
         src_out = _frames_to_tc(src_out_f, fps)
         rec_in = _frames_to_tc(rec_in_f, fps)
         rec_out = _frames_to_tc(rec_out_f, fps)
-        line = f"{idx:03d}  {base[:8]:<8} V     C        {src_in} {src_out} {rec_in} {rec_out}"
+        line = f"{idx:03d}  {reel:<8} V     C        {src_in} {src_out} {rec_in} {rec_out}"
         lines.append(line)
-        cursor_frames = rec_out_f
+        lines.append(f"* FROM CLIP NAME: {os.path.basename(input_path)}")
     with open(output_path, "w", encoding="utf-8") as fh:
         fh.write("\n".join(lines) + "\n")
 
@@ -221,6 +236,8 @@ def cut_video(
     srt_out: str | None,
     edl_out: str | None,
     fps: float,
+    reel_name: str | None,
+    snap_srt: bool,
     merge_gap: float,
     pad: float,
     crf: int,
@@ -264,9 +281,9 @@ def cut_video(
     if srt_out:
         mapped = _map_cues_to_timeline(padded, segments)
         with open(srt_out, "w", encoding="utf-8") as fh:
-            fh.write(_format_srt(mapped))
+            fh.write(_format_srt(mapped, snap_fps=fps if snap_srt else None))
     if edl_out:
-        _write_edl(segments, input_path=input_path, output_path=edl_out, fps=fps)
+        _write_edl(segments, input_path=input_path, output_path=edl_out, fps=fps, reel_name=reel_name)
 
 
 def main() -> int:
@@ -277,6 +294,8 @@ def main() -> int:
     parser.add_argument("--srt-out", help="Output SRT aligned to cut video")
     parser.add_argument("--edl", help="Output EDL path (CMX3600)")
     parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL timecode")
+    parser.add_argument("--reel-name", help="Reel name override for EDL (max 8 chars)")
+    parser.add_argument("--snap-srt", action="store_true", help="Snap SRT times to FPS frame boundaries")
     parser.add_argument("--merge-gap", type=float, default=0.15, help="Merge gaps shorter than this (seconds)")
     parser.add_argument("--pad", type=float, default=0.0, help="Extend each cue by this many seconds on both ends")
     parser.add_argument("--crf", type=int, default=20, help="x264 CRF (lower is higher quality)")
@@ -295,6 +314,8 @@ def main() -> int:
         srt_out=args.srt_out,
         edl_out=args.edl,
         fps=args.fps,
+        reel_name=args.reel_name,
+        snap_srt=args.snap_srt,
         merge_gap=args.merge_gap,
         pad=args.pad,
         crf=args.crf,
