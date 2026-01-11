@@ -7,17 +7,16 @@
 - `yt-dlp` と `ffmpeg` が PATH にあること  
   例: `brew install yt-dlp ffmpeg`
 
-## 使い方
-指定区間だけをダウンロードして保存します。高速な範囲ダウンロード（再エンコードなし）のみを提供します。
+## 使い方（単体ダウンロード）
+指定区間だけをダウンロードして保存します。
 
 ```bash
-python download_clip.py "https://www.youtube.com/watch?v=XXXXX" 00:01:23 output/clip.webm \
+python download_clip.py "https://www.youtube.com/watch?v=XXXXX" 00:01:23 output/clip.mp4 \
   --end 00:02:34 \
   --buffer 3.0           # 前後バッファ秒数
-  --format "bv*[height<=1080]+ba/best"
+  --format "bv*[height<=1080][ext=mp4][vcodec^=avc1]+ba[ext=m4a]/b[height<=1080][ext=mp4][vcodec^=avc1]"
 ```
 
-- yt-dlp の `--download-sections` でコピーするだけ（再エンコードなし）。キーフレームずれに備えてバッファを付与。
 - `--end` を省略すると末尾まで。
 
 ## 補足
@@ -75,7 +74,7 @@ python speech_enhance.py input_video.mp4 enhanced.wav --audio-only
 
 実行:
 ```bash
-python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.txt
+python pipeline.py --segments segments.txt
 ```
 
 出力は `output/<video_id>/` 配下にまとめられます（`<video_id>_full.mp4`, `<video_id>_01_src.mp4` など）。
@@ -84,8 +83,13 @@ python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.t
 区間ごとに `key=value` を追加できます（例: `pad=0.12 merge_gap=0.3 cut_video=1 edl=1`）。
 ```
 # start end name(optional) [options...]
-// options: trim_words=1 cut_video=1 edl=1 pad=0.12 merge_gap=0.3 words_model=large words_language=ja words_device=cpu words_compute_type=int8 words_beam=5 cut_crf=20 cut_preset=veryfast
-00:16:44 00:25:19 intro pad=0.12 merge_gap=0.3 trim_words=1 cut_video=1 edl=1
+# options:
+#   trim_words=1   文字タイムスタンプでSRTの開始/終了を詰める
+#   cut_video=1    SRTの空白をカットして動画を短くする
+#   edl=1          cut_video 時にEDLも出力（CFR化も自動）
+#   pad=0.2        前後に余白を追加
+#   merge_gap=0.3  短い隙間は結合
+00:16:44 00:25:19 intro pad=0.2 merge_gap=0.3 trim_words=1 cut_video=1 edl=1
 ```
 
 ## 単語タイムスタンプで字幕の開始/終了を詰める
@@ -96,7 +100,7 @@ python pipeline.py "https://www.youtube.com/watch?v=XXXXX" --segments segments.t
 ```bash
 .venv/bin/python whisper_words.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_enh.mp4 \
   output/ui1MX5M_2D0/ui1MX5M_2D0_01_words.json \
-  --model small --language ja
+  --model large --language ja
 ```
 
 ### 2) SRTを詰める
@@ -119,7 +123,13 @@ python srt_cut_video.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_words_trimmed.srt \
 EDLも出す場合:
 ```bash
 python srt_cut_video.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_words_trimmed.srt \
-  output/ui1MX5M_2D0/ui1MX5M_2D0_01_src.mp4 \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_src_cfr.mp4 \
   output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.mp4 \
-  --edl output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.edl --fps 30
+  --edl output/ui1MX5M_2D0/ui1MX5M_2D0_01_cut.edl \
+  --reel-name ui1MX5M
 ```
+
+### EDL用のCFR素材
+- VFR素材だとEDLがズレるため、EDL適用時はCFR素材を使うのが安全です。
+- パイプラインでは `edl=1` のときに `*_src_cfr.mp4` を自動生成して使用します。
+- Resolve側のリール名はEDLの8文字と一致させてください。

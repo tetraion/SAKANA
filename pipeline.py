@@ -144,6 +144,33 @@ def _clip_from_full(
     _run(cmd)
 
 
+def _ensure_cfr(input_path: str, output_path: str, fps: int = 30) -> None:
+    if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        return
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        input_path,
+        "-r",
+        str(fps),
+        "-vsync",
+        "cfr",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        output_path,
+    ]
+    _run(cmd)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Download -> Enhance -> Transcribe -> (Optional) Cut EDL pipeline")
     parser.add_argument("url", nargs="?", help="YouTube URL (optional if provided in segments.txt)")
@@ -223,6 +250,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             cut_video = os.path.join(output_dir, f"{clip_base}_cut.mp4")
             cut_srt = os.path.join(output_dir, f"{clip_base}_cut.srt")
             cut_edl = os.path.join(output_dir, f"{clip_base}_cut.edl")
+            cfr_src = os.path.join(output_dir, f"{clip_base}_src_cfr.mp4")
 
             if os.path.exists(downloaded) and os.path.getsize(downloaded) > 0:
                 print(f"[{label}] Clip exists, skipping cut.")
@@ -310,6 +338,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 do_cut_video = seg_opts.get("cut_video", "").lower() in ("1", "true", "yes", "on")
 
             if do_cut_video:
+                use_edl = seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on")
+                cut_input = downloaded
+                if use_edl:
+                    print(f"[{label}] CFR source for EDL...")
+                    _ensure_cfr(downloaded, cfr_src)
+                    cut_input = cfr_src
                 print(f"[{label}] Cutting video by SRT cues...")
                 pad = float(seg_opts.get("pad", args.cut_pad))
                 merge_gap = float(seg_opts.get("merge_gap", args.cut_merge_gap))
@@ -320,7 +354,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     sys.executable,
                     os.path.join(os.path.dirname(__file__), "srt_cut_video.py"),
                     srt_input,
-                    downloaded,
+                    cut_input,
                     cut_video,
                     "--srt-out",
                     cut_srt,
@@ -333,7 +367,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "--preset",
                     preset,
                 ]
-                if seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on"):
+                if use_edl:
                     cut_cmd.extend(["--edl", cut_edl, "--snap-srt"])
                 _run(cut_cmd)
 
