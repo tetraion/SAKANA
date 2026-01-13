@@ -333,14 +333,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 ]
                 _run(trim_cmd)
 
-            do_cut_video = False
-            if seg_opts.get("cut_video"):
-                do_cut_video = seg_opts.get("cut_video", "").lower() in ("1", "true", "yes", "on")
+            out_mp4 = seg_opts.get("out_mp4", "").lower() in ("1", "true", "yes", "on")
+            out_srt = seg_opts.get("out_srt", "").lower() in ("1", "true", "yes", "on")
+            out_edl = seg_opts.get("out_edl", "").lower() in ("1", "true", "yes", "on")
+            do_cut_video = out_mp4 or out_srt or out_edl
 
             if do_cut_video:
-                use_edl = seg_opts.get("edl", "").lower() in ("1", "true", "yes", "on")
                 cut_input = downloaded
-                if use_edl:
+                if out_edl:
                     print(f"[{label}] CFR source for EDL...")
                     _ensure_cfr(downloaded, cfr_src)
                     cut_input = cfr_src
@@ -367,8 +367,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "--preset",
                     preset,
                 ]
-                if use_edl:
+                if not out_mp4:
+                    cut_cmd.append("--no-video")
+                if out_edl:
                     cut_cmd.extend(["--edl", cut_edl, "--snap-srt"])
+                if not out_srt:
+                    cut_cmd.remove("--srt-out")
+                    cut_cmd.remove(cut_srt)
                 _run(cut_cmd)
 
             print(f"[{label}] ✓ Done: {clip_base}")

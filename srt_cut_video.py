@@ -242,6 +242,7 @@ def cut_video(
     pad: float,
     crf: int,
     preset: str,
+    render_video: bool,
 ) -> None:
     cues = _parse_srt(srt_path)
     duration = _probe_duration(input_path)
@@ -252,31 +253,34 @@ def cut_video(
     if not segments:
         raise SystemExit("✗ No valid cues found in SRT.")
 
-    filter_complex = _build_filter(segments)
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        input_path,
-        "-filter_complex",
-        filter_complex,
-        "-map",
-        "[outv]",
-        "-map",
-        "[outa]",
-        "-c:v",
-        "libx264",
-        "-crf",
-        str(crf),
-        "-preset",
-        preset,
-        "-c:a",
-        "aac",
-        "-movflags",
-        "+faststart",
-        output_path,
-    ]
-    _run(cmd)
+    if render_video:
+        filter_complex = _build_filter(segments)
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            input_path,
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[outv]",
+            "-map",
+            "[outa]",
+            "-c:v",
+            "libx264",
+            "-crf",
+            str(crf),
+            "-preset",
+            preset,
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+            output_path,
+        ]
+        _run(cmd)
+    elif not (srt_out or edl_out):
+        raise SystemExit("✗ --no-video requires --srt-out and/or --edl.")
 
     if srt_out:
         mapped = _map_cues_to_timeline(padded, segments)
@@ -300,6 +304,7 @@ def main() -> int:
     parser.add_argument("--pad", type=float, default=0.0, help="Extend each cue by this many seconds on both ends")
     parser.add_argument("--crf", type=int, default=20, help="x264 CRF (lower is higher quality)")
     parser.add_argument("--preset", default="veryfast", help="x264 preset")
+    parser.add_argument("--no-video", action="store_true", help="Skip mp4 output (EDL/SRT only)")
     args = parser.parse_args()
 
     if not os.path.exists(args.srt):
@@ -320,8 +325,12 @@ def main() -> int:
         pad=args.pad,
         crf=args.crf,
         preset=args.preset,
+        render_video=not args.no_video,
     )
-    print(f"✓ Cut video saved to {args.output}")
+    if args.no_video:
+        print("✓ Cut outputs saved (EDL/SRT only)")
+    else:
+        print(f"✓ Cut video saved to {args.output}")
     return 0
 
 

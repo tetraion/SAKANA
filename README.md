@@ -80,17 +80,19 @@ python pipeline.py --segments segments.txt
 出力は `output/<video_id>/` 配下にまとめられます（`<video_id>_full.mp4`, `<video_id>_01_src.mp4` など）。
 
 ### segments.txt でのオプション指定
-区間ごとに `key=value` を追加できます（例: `pad=0.12 merge_gap=0.3 cut_video=1 edl=1`）。
+区間ごとに `key=value` を追加できます（例: `pad=0.12 merge_gap=0.3 out_srt=1 out_edl=1`）。
 ```
 # start end name(optional) [options...]
 # options:
 #   trim_words=1   文字タイムスタンプでSRTの開始/終了を詰める
-#   cut_video=1    SRTの空白をカットして動画を短くする
-#   edl=1          cut_video 時にEDLも出力（CFR化も自動）
+#   out_mp4=1      mp4出力
+#   out_srt=1      cut.srt出力
+#   out_edl=1      EDL出力（CFR化も自動）
 #   pad=0.2        前後に余白を追加
 #   merge_gap=0.3  短い隙間は結合
-00:16:44 00:25:19 intro pad=0.2 merge_gap=0.3 trim_words=1 cut_video=1 edl=1
+00:16:44 00:25:19 intro pad=0.2 merge_gap=0.3 trim_words=1 out_srt=1 out_edl=1
 ```
+`out_*` が全て 0 の場合はカット処理は実行されません。
 
 ## 単語タイムスタンプで字幕の開始/終了を詰める
 「えーと」等のフィラーが音声にはあるが字幕に無い場合、単語タイムスタンプを使って
