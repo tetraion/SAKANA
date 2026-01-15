@@ -209,6 +209,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--enhance-method", choices=["noisereduce", "deepfilternet"], default="noisereduce")
     parser.add_argument("--language", default="ja", help="Whisper language code")
     parser.add_argument("--model", default="mlx-community/whisper-large-v3-mlx")
+    parser.add_argument("--transcribe-remote-url", default=os.getenv("TRANSCRIBE_REMOTE_URL"), help="Remote ASR URL for SRT")
+    parser.add_argument("--transcribe-remote-model", default="openai/whisper-large-v3", help="Remote ASR model for SRT")
+    parser.add_argument("--transcribe-remote-language", help="Remote ASR language for SRT (default: --language)")
     parser.add_argument("--gap", type=float, default=0.5, help="Gap threshold for cuts (seconds)")
     parser.add_argument("--words-model", default="large", help="Whisper model for word timestamps")
     parser.add_argument("--words-language", default="ja", help="Language code for word timestamps")
@@ -296,6 +299,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print(f"[{label}] Transcribing to SRT... (skipped, file exists)")
             else:
                 print(f"[{label}] Transcribing to SRT...")
+                use_remote = seg_opts.get("remote", "").lower() in ("1", "true", "yes", "on")
+                remote_url = seg_opts.get("words_remote_url", args.words_remote_url)
                 tr_cmd = [
                     sys.executable,
                     os.path.join(os.path.dirname(__file__), "transcribe_mlx.py"),
@@ -306,6 +311,20 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "--model",
                     args.model,
                 ]
+                if use_remote:
+                    remote_target = args.transcribe_remote_url or remote_url
+                    if not remote_target:
+                        raise SystemExit("remote=1 requires remote URL for transcription")
+                    tr_cmd.extend(
+                        [
+                            "--remote-url",
+                            remote_target,
+                            "--remote-model",
+                            args.transcribe_remote_model,
+                        ]
+                    )
+                    if args.transcribe_remote_language:
+                        tr_cmd.extend(["--remote-language", args.transcribe_remote_language])
                 _run(tr_cmd)
 
             print(f"[{label}] De-duplicating SRT...")
@@ -344,10 +363,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "--beam",
                         str(int(seg_opts.get("words_beam", args.words_beam))),
                     ]
-                    use_remote = seg_opts.get("words_remote", "").lower() in ("1", "true", "yes", "on")
+                    use_remote = seg_opts.get("remote", "").lower() in ("1", "true", "yes", "on")
                     remote_url = seg_opts.get("words_remote_url", args.words_remote_url)
                     if use_remote and not remote_url:
-                        raise SystemExit("words_remote=1 requires words_remote_url (or --words-remote-url)")
+                        raise SystemExit("remote=1 requires words_remote_url (or --words-remote-url)")
                     if use_remote or remote_url:
                         ww_cmd.extend(["--remote-url", remote_url])
                         ww_cmd.extend(

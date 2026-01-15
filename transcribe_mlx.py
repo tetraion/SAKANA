@@ -13,7 +13,7 @@ import os
 import platform
 import subprocess
 import tempfile
-from typing import Iterable, List, Sequence
+from typing import Iterable, List, Optional, Sequence, Tuple
 
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-mlx"
@@ -69,6 +69,58 @@ def generate_srt(segments: Iterable[dict], output_path: str, offset_seconds: flo
         f.write("\n".join(lines))
 
 
+def _parse_chunk_timestamp(chunk: dict) -> Optional[Tuple[float, float]]:
+    ts = chunk.get("timestamp")
+    if ts is None:
+        ts = chunk.get("timestamps")
+    if isinstance(ts, (list, tuple)) and len(ts) == 2:
+        return float(ts[0]), float(ts[1])
+    if "start" in chunk and "end" in chunk:
+        return float(chunk["start"]), float(chunk["end"])
+    return None
+
+
+def transcribe_remote(input_path: str, base_url: str, model: str, language: Optional[str]):
+    try:
+        import requests  # type: ignore
+    except ImportError as exc:  # pragma: no cover - runtime dep check
+        raise SystemExit("requests が入っていません。`pip install requests` を実行してください。") from exc
+
+    url = base_url.rstrip("/") + "/asr"
+    params = {"model": model, "return_timestamps": "true"}
+    if language:
+        params["language"] = language
+
+    with open(input_path, "rb") as fh:
+        resp = requests.post(
+            url,
+            params=params,
+            files={"file": (os.path.basename(input_path), fh, "audio/wav")},
+            timeout=600,
+        )
+    if resp.status_code != 200:
+        raise SystemExit(f"✗ Remote ASR failed ({resp.status_code}): {resp.text}")
+
+    payload = resp.json()
+    result = payload.get("result", {})
+    chunks = result.get("chunks") or []
+    segments = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        ts = _parse_chunk_timestamp(chunk)
+        if not ts:
+            continue
+        text = str(chunk.get("text") or "").strip()
+        if not text:
+            continue
+        segments.append({"start": ts[0], "end": ts[1], "text": text})
+
+    if not segments:
+        raise SystemExit("✗ Remote ASR returned no timestamped segments")
+    return result, segments
+
+
 def transcribe_with_mlx(audio_path: str, model: str, language: str, verbose: bool = True):
     """mlx-whisper で文字起こし。"""
     try:
@@ -103,6 +155,9 @@ def main(argv: list[str] | None = None) -> int:
         default=0.0,
         help="字幕タイムコードに加える秒オフセット（デフォルト: 0）",
     )
+    parser.add_argument("--remote-url", help="Windows HF Server base URL (e.g., http://<IP>:8000)")
+    parser.add_argument("--remote-model", default="openai/whisper-large-v3", help="Remote ASR model name")
+    parser.add_argument("--remote-language", help="Remote ASR language code (default: --language)")
     # カットEDL生成は srt_to_edl.py 側で完結させる
     args = parser.parse_args(argv)
 
@@ -110,35 +165,53 @@ def main(argv: list[str] | None = None) -> int:
         print(f"✗ Input not found: {args.input}")
         return 1
 
-    # Apple Silicon 以外はパフォーマンス出ないため警告のみ
-    if not (platform.system() == "Darwin" and platform.machine() == "arm64"):
-        print("⚠️  MLX Whisper は Apple Silicon 最適化です。この環境では遅い/動かない可能性があります。")
+    use_remote = args.remote_url is not None
+    if not use_remote:
+        # Apple Silicon 以外はパフォーマンス出ないため警告のみ
+        if not (platform.system() == "Darwin" and platform.machine() == "arm64"):
+            print("⚠️  MLX Whisper は Apple Silicon 最適化です。この環境では遅い/動かない可能性があります。")
 
     os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         wav_path = os.path.join(tmpdir, "audio.wav")
-        print("Extracting audio...")
-        try:
-            extract_audio(args.input, wav_path)
-        except subprocess.CalledProcessError as exc:
-            print(f"✗ Failed to extract audio: {exc}")
-            return 1
+        if use_remote:
+            print(f"Transcribing with remote ASR ({args.remote_model})...")
+            try:
+                result, segments = transcribe_remote(
+                    args.input,
+                    base_url=args.remote_url,
+                    model=args.remote_model,
+                    language=args.remote_language or args.language,
+                )
+            except SystemExit as exc:
+                print(f"✗ {exc}")
+                return 1
+            except Exception as exc:
+                print(f"✗ Remote transcription failed: {exc}")
+                return 1
+        else:
+            print("Extracting audio...")
+            try:
+                extract_audio(args.input, wav_path)
+            except subprocess.CalledProcessError as exc:
+                print(f"✗ Failed to extract audio: {exc}")
+                return 1
 
-        print(f"Transcribing with MLX Whisper ({args.model})...")
-        try:
-            result, segments = transcribe_with_mlx(
-                wav_path,
-                model=args.model,
-                language=args.language,
-                verbose=not args.no_verbose,
-            )
-        except SystemExit as exc:
-            print(f"✗ {exc}")
-            return 1
-        except Exception as exc:
-            print(f"✗ Transcription failed: {exc}")
-            return 1
+            print(f"Transcribing with MLX Whisper ({args.model})...")
+            try:
+                result, segments = transcribe_with_mlx(
+                    wav_path,
+                    model=args.model,
+                    language=args.language,
+                    verbose=not args.no_verbose,
+                )
+            except SystemExit as exc:
+                print(f"✗ {exc}")
+                return 1
+            except Exception as exc:
+                print(f"✗ Transcription failed: {exc}")
+                return 1
 
         print("Writing SRT...")
         generate_srt(segments, args.output, offset_seconds=args.offset)
