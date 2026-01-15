@@ -424,6 +424,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     "--preset",
                     preset,
                 ]
+                if os.path.exists(words_json):
+                    cut_cmd.extend(["--words-json", words_json])
                 if not out_mp4:
                     cut_cmd.append("--no-video")
                 if out_edl:

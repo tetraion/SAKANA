@@ -197,11 +197,20 @@ def main() -> int:
     parser.add_argument("output", help="Output SRT path")
     parser.add_argument("--pad", type=float, default=0.0, help="Seconds to pad at both ends")
     parser.add_argument("--min-cue", type=float, default=0.2, help="Minimum cue duration after trimming")
+    parser.add_argument(
+        "--no-guard-next",
+        action="store_true",
+        help="Disable guard that reverts trims crossing the next cue start",
+    )
     args = parser.parse_args()
 
     cues = _parse_srt(args.srt)
     words = _load_words(args.words_json)
     trimmed, misses = _trim_by_words(cues, words, pad=args.pad, min_cue=args.min_cue)
+    if not args.no_guard_next:
+        for i in range(len(trimmed) - 1):
+            if trimmed[i].start > cues[i + 1].start:
+                trimmed[i] = cues[i]
 
     with open(args.output, "w", encoding="utf-8") as fh:
         fh.write(_format_srt(trimmed))

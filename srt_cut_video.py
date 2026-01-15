@@ -6,6 +6,7 @@ Cut a video by keeping only SRT cue intervals (remove gaps).
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import math
 import re
@@ -109,6 +110,40 @@ def _parse_srt(path: str) -> List[Cue]:
     return cues
 
 
+def _load_words(path: str) -> List[tuple[float, float]]:
+    data = json.loads(open(path, "r", encoding="utf-8").read())
+    segments = None
+    if isinstance(data, dict):
+        if "segments" in data:
+            segments = data["segments"]
+        elif "transcription" in data:
+            segments = data["transcription"]
+    if segments is None:
+        raise ValueError("Unsupported JSON format: expected top-level 'segments' or 'transcription'")
+    words: List[tuple[float, float]] = []
+    for seg in segments:
+        for w in seg.get("words", []):
+            if "start" in w and "end" in w:
+                words.append((float(w["start"]), float(w["end"])))
+    if not words:
+        raise ValueError("No words found in JSON (missing 'words' array?)")
+    return words
+
+
+def _segments_from_words(words: List[tuple[float, float]], gap: float) -> List[Cue]:
+    words = sorted(words)
+    segments: List[Cue] = []
+    start, end = words[0]
+    for w_start, w_end in words[1:]:
+        if w_start - end <= gap:
+            end = max(end, w_end)
+        else:
+            segments.append(Cue(start=start, end=end))
+            start, end = w_start, w_end
+    segments.append(Cue(start=start, end=end))
+    return segments
+
+
 def _merge_close(cues: List[Cue], gap: float) -> List[Cue]:
     if not cues:
         return []
@@ -189,16 +224,24 @@ def _write_edl(
     reel_name: str | None,
 ) -> None:
     base = os.path.splitext(os.path.basename(input_path))[0]
-    reel = (reel_name or base)[:8]
+    reel = reel_name or base
     lines = [f"TITLE: {base}", "FCM: NON-DROP FRAME", ""]
     cursor_seconds = 0.0
+    duration = _probe_duration(input_path)
+    max_frame = max(0, int(math.floor(duration * fps)) - 1)
     for idx, seg in enumerate(segments, start=1):
         src_in_f = _seconds_to_frame(seg.start, fps, "round")
         src_out_f = _seconds_to_frame(seg.end, fps, "round")
+        if src_in_f > max_frame:
+            continue
+        if src_out_f > max_frame:
+            src_out_f = max_frame
         if src_out_f <= src_in_f:
             src_out_f = src_in_f + 1
         rec_in_f = _seconds_to_frame(cursor_seconds, fps, "round")
-        cursor_seconds += seg.end - seg.start
+        # Keep record length aligned to the (possibly clamped) source length.
+        src_len_frames = max(1, src_out_f - src_in_f)
+        cursor_seconds += src_len_frames / fps
         rec_out_f = _seconds_to_frame(cursor_seconds, fps, "round")
         if rec_out_f <= rec_in_f:
             rec_out_f = rec_in_f + 1
@@ -213,7 +256,11 @@ def _write_edl(
         fh.write("\n".join(lines) + "\n")
 
 
-def _map_cues_to_timeline(cues: List[Cue], segments: List[Cue]) -> List[Cue]:
+def _map_cues_to_timeline(
+    cues: List[Cue],
+    segments: List[Cue],
+    drop_unmapped: bool = False,
+) -> List[Cue]:
     mapped = _build_timeline_map(segments)
     out: List[Cue] = []
     for cue in cues:
@@ -229,6 +276,8 @@ def _map_cues_to_timeline(cues: List[Cue], segments: List[Cue]) -> List[Cue]:
         if overlaps:
             out.append(Cue(start=overlaps[0][0], end=overlaps[-1][1], text=cue.text))
         else:
+            if drop_unmapped:
+                continue
             nearest = min(mapped, key=lambda seg: abs(cue.start - seg[0]))
             seg_start, _, seg_offset = nearest
             duration = max(0.0, cue.end - cue.start)
@@ -251,10 +300,17 @@ def cut_video(
     crf: int,
     preset: str,
     render_video: bool,
+    words_json: str | None,
+    words_gap: float | None,
 ) -> None:
     cues = _parse_srt(srt_path)
     duration = _probe_duration(input_path)
-    padded = _expand_cues(cues, pad=pad)
+    if words_json:
+        words = _load_words(words_json)
+        base_segments = _segments_from_words(words, gap=words_gap if words_gap is not None else merge_gap)
+    else:
+        base_segments = cues
+    padded = _expand_cues(base_segments, pad=pad)
     padded = _clamp_cues(padded, duration)
     segments = _merge_close(padded, gap=merge_gap)
     segments = _clamp_cues(segments, duration)
@@ -291,7 +347,7 @@ def cut_video(
         raise SystemExit("✗ --no-video requires --srt-out and/or --edl.")
 
     if srt_out:
-        mapped = _map_cues_to_timeline(padded, segments)
+        mapped = _map_cues_to_timeline(cues, segments, drop_unmapped=bool(words_json))
         with open(srt_out, "w", encoding="utf-8") as fh:
             fh.write(_format_srt(mapped, snap_fps=fps if snap_srt else None))
     if edl_out:
@@ -306,13 +362,15 @@ def main() -> int:
     parser.add_argument("--srt-out", help="Output SRT aligned to cut video")
     parser.add_argument("--edl", help="Output EDL path (CMX3600)")
     parser.add_argument("--fps", type=float, default=30.0, help="FPS for EDL timecode")
-    parser.add_argument("--reel-name", help="Reel name override for EDL (max 8 chars)")
+    parser.add_argument("--reel-name", help="Reel name override for EDL")
     parser.add_argument("--snap-srt", action="store_true", help="Snap SRT times to FPS frame boundaries")
     parser.add_argument("--merge-gap", type=float, default=0.15, help="Merge gaps shorter than this (seconds)")
     parser.add_argument("--pad", type=float, default=0.0, help="Extend each cue by this many seconds on both ends")
     parser.add_argument("--crf", type=int, default=20, help="x264 CRF (lower is higher quality)")
     parser.add_argument("--preset", default="veryfast", help="x264 preset")
     parser.add_argument("--no-video", action="store_true", help="Skip mp4 output (EDL/SRT only)")
+    parser.add_argument("--words-json", help="Use word timestamps JSON to build cut segments")
+    parser.add_argument("--words-gap", type=float, help="Gap threshold for word-based segments (seconds)")
     args = parser.parse_args()
 
     if not os.path.exists(args.srt):
@@ -334,6 +392,8 @@ def main() -> int:
         crf=args.crf,
         preset=args.preset,
         render_video=not args.no_video,
+        words_json=args.words_json,
+        words_gap=args.words_gap,
     )
     if args.no_video:
         print("✓ Cut outputs saved (EDL/SRT only)")
