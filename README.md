@@ -85,12 +85,19 @@ python pipeline.py --segments segments.txt
 # start end name(optional) [options...]
 # options:
 #   trim_words=1   文字タイムスタンプでSRTの開始/終了を詰める
+#   words_remote=1 word timestampsをWindows ASRに投げる
+#   words_remote_url=... Windows ASRのURL (default: $WORDS_REMOTE_URL or http://DESKTOP-OTONNO5:8000)
 #   out_mp4=1      mp4出力
 #   out_srt=1      cut.srt出力
 #   out_edl=1      EDL出力（CFR化も自動）
 #   pad=0.2        前後に余白を追加
 #   merge_gap=0.3  短い隙間は結合
-00:16:44 00:25:19 intro pad=0.2 merge_gap=0.3 trim_words=1 out_srt=1 out_edl=1
+00:16:44 00:25:19 intro pad=0.2 merge_gap=0.3 trim_words=1 words_remote=1 out_srt=1 out_edl=1
+```
+
+`.env.local` で固定する場合:
+```bash
+WORDS_REMOTE_URL=http://DESKTOP-OTONNO5:8000
 ```
 `out_*` が全て 0 の場合はカット処理は実行されません。
 
@@ -104,6 +111,14 @@ python pipeline.py --segments segments.txt
   output/ui1MX5M_2D0/ui1MX5M_2D0_01_words.json \
   --model large --language ja
 ```
+
+### Windows ASR (remote) で単語タイムスタンプを作る
+```bash
+.venv/bin/python whisper_words.py output/ui1MX5M_2D0/ui1MX5M_2D0_01_enh.mp4 \
+  output/ui1MX5M_2D0/ui1MX5M_2D0_01_words.json \
+  --remote-url http://<WINDOWS_IP>:8000
+```
+※ リモートのデフォルトモデルは `large-v3`。
 
 ### 2) SRTを詰める
 ```bash

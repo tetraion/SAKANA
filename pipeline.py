@@ -70,6 +70,21 @@ def _read_segments(path: str) -> tuple[Optional[str], list[tuple[str, Optional[s
     return url, segments
 
 
+def _load_dotenv(path: str = ".env.local") -> None:
+    if not os.path.exists(path):
+        return
+    with open(path, "r", encoding="utf-8") as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
 def _slugify(name: str) -> str:
     cleaned = []
     for ch in name.lower():
@@ -172,6 +187,7 @@ def _ensure_cfr(input_path: str, output_path: str, fps: int = 30) -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(description="Download -> Enhance -> Transcribe -> (Optional) Cut EDL pipeline")
     parser.add_argument("url", nargs="?", help="YouTube URL (optional if provided in segments.txt)")
     parser.add_argument("start", nargs="?", help="Start time (hh:mm:ss or mm:ss or seconds)")
@@ -199,6 +215,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--words-device", default="cpu", help="Device for word timestamps (cpu/cuda/mps)")
     parser.add_argument("--words-compute-type", default="int8", help="Compute type for word timestamps")
     parser.add_argument("--words-beam", type=int, default=5, help="Beam size for word timestamps")
+    parser.add_argument(
+        "--words-remote-url",
+        default=os.getenv("WORDS_REMOTE_URL", "http://DESKTOP-OTONNO5:8000"),
+        help="Windows HF Server URL for word timestamps",
+    )
+    parser.add_argument("--words-remote-model", default="large-v3", help="Remote ASR model name")
+    parser.add_argument("--words-remote-language", help="Remote ASR language code (default: --words-language)")
     parser.add_argument("--cut-pad", type=float, default=0.12, help="Pad seconds for cut video cues")
     parser.add_argument("--cut-merge-gap", type=float, default=0.3, help="Merge gaps shorter than this in cut video")
     parser.add_argument("--cut-crf", type=int, default=20, help="CRF for cut video")
@@ -321,6 +344,21 @@ def main(argv: Optional[list[str]] = None) -> int:
                         "--beam",
                         str(int(seg_opts.get("words_beam", args.words_beam))),
                     ]
+                    use_remote = seg_opts.get("words_remote", "").lower() in ("1", "true", "yes", "on")
+                    remote_url = seg_opts.get("words_remote_url", args.words_remote_url)
+                    if use_remote and not remote_url:
+                        raise SystemExit("words_remote=1 requires words_remote_url (or --words-remote-url)")
+                    if use_remote or remote_url:
+                        ww_cmd.extend(["--remote-url", remote_url])
+                        ww_cmd.extend(
+                            [
+                                "--remote-model",
+                                seg_opts.get("words_remote_model", args.words_remote_model),
+                            ]
+                        )
+                        remote_lang = seg_opts.get("words_remote_language", args.words_remote_language)
+                        if remote_lang:
+                            ww_cmd.extend(["--remote-language", remote_lang])
                     _run(ww_cmd)
 
                 print(f"[{label}] Trimming SRT by words...")

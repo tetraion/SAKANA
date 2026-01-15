@@ -1,11 +1,15 @@
-url=https://www.youtube.com/watch?v=Jh4BDm82AV4
+url=https://www.youtube.com/watch?v=kT-S2K5yk8A
 # start end name(optional) [options...]
 # options (key=value):
 #   trim_words=1|0         word timestampsでSRTの開始/終了を詰める
+#   words_remote=1|0       word timestampsをWindows ASRに投げる
+#   words_remote_url=...   Windows HF ServerのURLでword timestampsを実行
+#   words_remote_model=... リモートASRモデル名 (default: large-v3)
+#   words_remote_language=ja  リモートASR言語 (default: words_language)
 #   out_mp4=1|0            mp4出力
 #   out_srt=1|0            cut.srt出力
 #   out_edl=1|0            カット用のEDLを出力（CFR化も自動）
 #   pad=0.12               カット時に前後へ足す秒数
 #   merge_gap=0.3          この秒数以下の隙間はカットせず残す
-00:44:58 00:56:46 trim_words=1 out_srt=1 out_edl=1 pad=0.2
+00:21:51 00:36:22  trim_words=1 words_remote=1 out_srt=1 out_edl=1 pad=0.2
 # 00:43:24 00:53:31 
