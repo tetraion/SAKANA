@@ -217,6 +217,7 @@ def _map_cues_to_timeline(cues: List[Cue], segments: List[Cue]) -> List[Cue]:
     mapped = _build_timeline_map(segments)
     out: List[Cue] = []
     for cue in cues:
+        overlaps: List[tuple[float, float]] = []
         for seg_start, seg_end, seg_offset in mapped:
             if cue.end <= seg_start or cue.start >= seg_end:
                 continue
@@ -224,8 +225,15 @@ def _map_cues_to_timeline(cues: List[Cue], segments: List[Cue]) -> List[Cue]:
             end = min(cue.end, seg_end)
             new_start = seg_offset + (start - seg_start)
             new_end = seg_offset + (end - seg_start)
-            out.append(Cue(start=new_start, end=new_end, text=cue.text))
-            break
+            overlaps.append((new_start, new_end))
+        if overlaps:
+            out.append(Cue(start=overlaps[0][0], end=overlaps[-1][1], text=cue.text))
+        else:
+            nearest = min(mapped, key=lambda seg: abs(cue.start - seg[0]))
+            seg_start, _, seg_offset = nearest
+            duration = max(0.0, cue.end - cue.start)
+            new_start = seg_offset + max(0.0, cue.start - seg_start)
+            out.append(Cue(start=new_start, end=new_start + duration, text=cue.text))
     return out
 
 
